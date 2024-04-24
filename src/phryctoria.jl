@@ -448,10 +448,12 @@ TBW
 function receiveevent!(procevents, comms, pos_intervals, waiting_tokens, e, ϵ, i)
     # println("Process ", i, ": Received event")
     # save e in events
-    push!(procevents, e)
+    eventᵢ = searchsortedfirst(map(x -> x.t, procevents), e.t)
+    insert!(procevents, eventᵢ, e)
     # Should be up to date, just might need to create a virtual event
     for token ∈ copy(waiting_tokens)
         @match token.target begin
+            # FIXME
             (e.process, :at, e.t) => begin # Process the event for the token
                 addeventtotoken!(token, e)
                 processtoken!(comms, waiting_tokens, token, i)
