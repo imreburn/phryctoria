@@ -13,7 +13,7 @@ colors = [:red, :blue, :green]
 
 A process which receives signal data, and as it finds roots sends them to the abstractor.
 """
-function process(comm::Channel, i, n, ϵ) # Task
+function process(comm::Channel, i, n, ϵ, pos_intervals) # Task
     filename = normpath("signals/signal" * string(i) * ".txt")
     data = []
     # While a signal exists
@@ -27,23 +27,35 @@ function process(comm::Channel, i, n, ϵ) # Task
         (t₁, x₁) = data[end-1]
         # Go through signal until root
         if sign(x₁) ≠ sign(x₂)
-            type = begin
-                if x₁ < 0
-                    type = :LEFT
-                end
-                if x₂ < 0
-                    type = :RIGHT
-                end
-                results
+            if x₁ < 0
+                type = :LEFT
+            end
+            if x₂ < 0
+                type = :RIGHT
             end
             loc = (t₁ * x₂ - t₂ * x₁) / (x₂ - x₁) # Root location considering a straight line between the two points
             id = string(i, "|", i, "|", loc)
             # Start with a default vector clock based on our current time
-            V = zeros(n)
+            V = fill(max(loc - ϵ, 0.), n)
             V[i] = loc
-            root_event = Event(id, i, loc, true, V, type)
+            root_event = Event(id, i, loc, true, V, false, type)
             # root = Root(id, i, types, loc, V)
-            put!(comm, Comm(:newevent, root_event, nothing))
+            
+            bound = 
+            if root_event.type == :LEFT && root_event.type == :RIGHT
+                :both
+            elseif root_event.type == :LEFT
+                :starting
+            elseif root_event.type == :RIGHT
+                :ending
+            else
+                :neither
+            end
+            printEvent(root_event, i, "Local process")
+            # println("Process ", i, ": pos_intervals(before): ", pos_intervals)    
+            updateintervals!(pos_intervals, bound, root_event.t)
+            # println("Process ", i, ": pos_intervals(after): ", pos_intervals)    
+            put!(comm, Comm(:newevent, root_event, pos_intervals))
         end
     end
 end
@@ -53,15 +65,15 @@ end
 
 Combine two events occurring on the same process at the same time to just one event.
 """
-function combine(e₁, e₂)
-    println("combine")
-    @match (e₁, e₂) begin
-        (Root(id₁, pid, types, t, V₁), Event(_, pid, t, _, V₂)) ||
-            (Event(_, pid, t, _, V₂), Root(id₁, pid, types, t, V₁)) => Root(id₁, pid, types, t, max.(V₁, V₂))
-        (Event(id₁, pid, t, is_pos, V₁), Event(_, pid, t, is_pos, V₂)) => Event(id₁, pid, t, is_pos, max.(V₁, V₂))
-        _ => error("Huh? How'd we end up with ", repr(e₁), " and ", repr(e₂), "?")
-    end
-end
+# function combine(e₁, e₂)
+#     println("combine")
+#     @match (e₁, e₂) begin
+#         (Root(id₁, pid, types, t, V₁), Event(_, pid, t, _, V₂)) ||
+#             (Event(_, pid, t, _, V₂), Root(id₁, pid, types, t, V₁)) => Root(id₁, pid, types, t, max.(V₁, V₂))
+#         (Event(id₁, pid, t, is_pos, V₁), Event(_, pid, t, is_pos, V₂)) => Event(id₁, pid, t, is_pos, max.(V₁, V₂))
+#         _ => error("Huh? How'd we end up with ", repr(e₁), " and ", repr(e₂), "?")
+#     end
+# end
 
 """
     updateProceventsV!(log, n)
@@ -71,7 +83,7 @@ Update vector clocks in the log.
 function updateProceventsV!(procevents, n)
     # Create a new vector clock of all zeros
     V = zeros(n)
-    for e ∈ keys(procevents)
+    for e ∈ procevents
         e.V = max.(e.V, V)
         V = copy(e.V)
     end
@@ -82,24 +94,19 @@ end
 
 Add an event to the log, cleaning up duplicates.
 """
-function updateProcevents!(procevents, new_event)
-    for (e, t) ∈ procevents
-        if t == new_event.t
-            # NOTE: hope it works
-            @match (e.type, new_event.type) begin
-                (_, :VLEFT) => return
-                (_, :VRIGHT) => return
-                (:LEFT, _) => return
-                (:RIGHT, _) => return
-                (_, :LEFT) => begin
-                    # replace
-                    tmp = replace(procevents, e=>new_event)
-                    procevents = tmp
-                    updateProceventsV!(procevents, length(event.V))
-                    return
-                end
-                (_, :RIGHT) => begin
-                    #replace
+function updateProcevents!(procevents, new_event, i)
+    println("Process ", i, ": updateProcevents: ", map(x -> x.t, procevents))
+    printEvent(new_event, i, "updateProcevents")
+    # printEvent(new_event, i, "updateProc")
+    for e ∈ procevents
+        if e.t == new_event.t
+            # when the duplicate is found
+            println("duplicate found!")
+            @match (e.isvir, new_event.isvir) begin
+                (_, true) => return
+                (false, _) => return
+                (_, false) => begin
+                    # virtual event is replaced by local event
                     tmp = replace(procevents, e=>new_event)
                     procevents = tmp
                     updateProceventsV!(procevents, length(event.V))
@@ -108,10 +115,11 @@ function updateProcevents!(procevents, new_event)
             end
         end
     end
+    println("no duplicate found")
     eventᵢ = searchsortedfirst(map(x -> x.t, procevents), new_event.t)
     insert!(procevents, eventᵢ, new_event)
-    # enqueue!(procevents, event, event.t)
     updateProceventsV!(procevents, length(new_event.V))
+    new_event
 end
 
 """
@@ -119,17 +127,17 @@ end
 
 Get the most recent event from the log.
 """
-function recentevent(log)
-    # We need this function because PriorityQueue doesn't allow for retrieving the last element.
-    # If we need more efficiency, consider using a SortedMultiDict (of DataStructures.jl) instead
-    # of a PriorityQueue.
-    # Hacky way to get the last element of the log
-    last_event = nothing
-    for e ∈ keys(log)
-        last_event = e
-    end
-    last_event
-end
+# function recentevent(log)
+#     # We need this function because PriorityQueue doesn't allow for retrieving the last element.
+#     # If we need more efficiency, consider using a SortedMultiDict (of DataStructures.jl) instead
+#     # of a PriorityQueue.
+#     # Hacky way to get the last element of the log
+#     last_event = nothing
+#     for e ∈ keys(log)
+#         last_event = e
+#     end
+#     last_event
+# end
 
 """
     foundroot!(comms, log, root)
@@ -138,11 +146,10 @@ Called whenever a root on the signal is found
 
 trigger found a root:
 """
-function foundroot!(comms, procevents, new_event)
-    println("Process ", new_event.process, ": Root, Time:", new_event.t, " Root Type: ", new_event.type)
+function foundroot!(comms, procevents, new_event, i)
     # Keep the root's vector clock consistent with the process's previous events
     begin
-        for e ∈ keys(procevents)
+        for e ∈ procevents
             if e.t > new_event.t
                 break
             end
@@ -160,20 +167,21 @@ function foundroot!(comms, procevents, new_event)
     #     end
     # end
     # add root info to log
-    updateProcevents!(procevents, new_event)
+    # printEvent(new_event, 0)
+    updateProcevents!(procevents, new_event, i)
 
     # NOTE maybe we need to fix it later
     # Return type is used for determining positive intervals
-    bound = if event.type == :LEFT && event.type == :RIGHT
-        :both
-    elseif event.type == :LEFT
-        :starting
-    elseif event.type == :RIGHT
-        :ending
-    else
-        :neither
-    end
-    (bound, new_event.t)
+    # bound = if event.type == :LEFT && event.type == :RIGHT
+    #     :both
+    # elseif event.type == :LEFT
+    #     :starting
+    # elseif event.type == :RIGHT
+    #     :ending
+    # else
+    #     :neither
+    # end
+    # (bound, new_event.t)
 end
 
 """
@@ -185,18 +193,18 @@ Assuming vector clocks are only set to show the → relation created by the abst
 sending to the solver, the abstractor must be sure to update vector clocks so the max
 difference between any two elements is ϵ.
 """
-function locked(log)
-    # Vector clocks are currently set as they came in
-    last_elem = recentevent(log).V
+# function locked(log)
+#     # Vector clocks are currently set as they came in
+#     last_elem = recentevent(log).V
 
-    # Go until there's partial overlap of the vector clocks
-    for (j, e) ∈ enumerate(keys(log))
-        # If all elements of e vector clock are less than those of last event in log
-        if !all(isless.(e.V, last_elem))
-            return j - 1
-        end
-    end
-end
+#     # Go until there's partial overlap of the vector clocks
+#     for (j, e) ∈ enumerate(keys(log))
+#         # If all elements of e vector clock are less than those of last event in log
+#         if !all(isless.(e.V, last_elem))
+#             return j - 1
+#         end
+#     end
+# end
 
 """
     ispos(intervals, t)
@@ -219,18 +227,18 @@ end
 
 TBW
 """
-function flushlog!(solver_comm, pos_intervals, log, flush_num, ϵ, i)
-    for _ = 1:flush_num
-        # cut events from log and send to solver
-        event = dequeue!(log)
+# function flushlog!(solver_comm, pos_intervals, log, flush_num, ϵ, i)
+#     for _ = 1:flush_num
+#         # cut events from log and send to solver
+#         event = dequeue!(log)
 
-        # Update vector clock to be consistent with ϵ
-        event.V = max.(event.t - ϵ, event.V)
+#         # Update vector clock to be consistent with ϵ
+#         event.V = max.(event.t - ϵ, event.V)
 
-        println("Process ", i, ": Sending event ", repr(event.V), " to solver")
-        put!(solver_comm, Comm(:newevent, event, pos_intervals))
-    end
-end
+#         println("Process ", i, ": Sending event ", repr(event.V), " to solver")
+#         put!(solver_comm, Comm(:newevent, event, pos_intervals))
+#     end
+# end
 
 """
     remoteroot!(solver_comm, pos_intervals, i, log, root, ϵ)
@@ -246,21 +254,21 @@ root: The received root
 
 trigger received communiqué about right root from process j:
 """
-function remoteroot!(solver_comm, pos_intervals, i, log, root, ϵ)
-    # create new event e at time root.t + ϵ where root → e
-    new_t = root.t + ϵ
-    new_id = string(i, "|", root.process, "|", new_t)
-    is_pos = ispos(pos_intervals, new_t)
-    new_V = copy(root.V)
-    new_V[i] = new_t
-    # NOTE change root.process -> i
-    new_event = Event(new_id, i, new_t, is_pos, new_V) # Event(id, process, t, ispos, V)
-    # add e info to log
-    updateProcevents!(log, new_event)
-    # if there are any log events whose positions are locked in:
-    flush_count = locked(log)
-    flushlog!(solver_comm, pos_intervals, log, flush_count, ϵ, i)
-end
+# function remoteroot!(solver_comm, pos_intervals, i, log, root, ϵ)
+#     # create new event e at time root.t + ϵ where root → e
+#     new_t = root.t + ϵ
+#     new_id = string(i, "|", root.process, "|", new_t)
+#     is_pos = ispos(pos_intervals, new_t)
+#     new_V = copy(root.V)
+#     new_V[i] = new_t
+#     # NOTE change root.process -> i
+#     new_event = Event(new_id, i, new_t, is_pos, new_V) # Event(id, process, t, ispos, V)
+#     # add e info to log
+#     updateProcevents!(log, new_event)
+#     # if there are any log events whose positions are locked in:
+#     flush_count = locked(log)
+#     flushlog!(solver_comm, pos_intervals, log, flush_count, ϵ, i)
+# end
 
 """
     updateintervals!(intervals, bound, t)
@@ -291,20 +299,20 @@ end
 
 An abstractor which takes root data and discretizes it for the solver.
 """
-function abstractor!(comms, solver_comm, log, i, ϵ) # Task
-    pos_intervals = []
-    while true
-        data = take!(comms[i])
-        @match data begin
-            Comm(:foundroot, root, _) => begin
-                (bound, t) = foundroot!(comms, log, root)
-                # Keep track of positive intervals for SAT of new events
-                updateintervals!(pos_intervals, bound, t)
-            end
-            Comm(:remoteroot, root, _) => remoteroot!(solver_comm, pos_intervals, i, log, root, ϵ)
-        end
-    end
-end
+# function abstractor!(comms, solver_comm, log, i, ϵ) # Task
+#     pos_intervals = []
+#     while true
+#         data = take!(comms[i])
+#         @match data begin
+#             Comm(:foundroot, root, _) => begin
+#                 (bound, t) = foundroot!(comms, log, root)
+#                 # Keep track of positive intervals for SAT of new events
+#                 updateintervals!(pos_intervals, bound, t)
+#             end
+#             Comm(:remoteroot, root, _) => remoteroot!(solver_comm, pos_intervals, i, log, root, ϵ)
+#         end
+#     end
+# end
 
 """
     cutcheck(falseprop, cut)
@@ -348,7 +356,12 @@ function getcut2(cut)
 end
 
 function printtoken(token, i, fname)
-    println("Process ", i, ": ", fname, ": Token: (owner: ", token.process, "), (target: ",token.target, "),  (cut: ", getcut(token.cut), "), (depend: ", token.depend, "), (eval: ", getcut2(token.cut), ")")
+    println("Process ", i, ": ", fname, ": Token: (owner: ", token.process, "), (target: ",token.target, "),  (cut: ", getcut(token.cut), "), (depend: ", token.depend, "), (eval: ", getcut2(token.cut), "), (isvir: ", token.isvir, "), (type: ", token.type, ")")
+end
+
+function printEvent(event, i, fname)
+    # println("Process ", i, ": ", fname, ": Token: (owner: ", token.process, "), (target: ",token.target, "),  (cut: ", getcut(token.cut), "), (depend: ", token.depend, "), (eval: ", getcut2(token.cut), ")")
+    println("Process ", i, ": ", fname, ": Event: (owner: ", event.process, "), (time: ",event.t, "),  (isvir?: ", event.isvir, "), (type: ", event.type, "), (PVC: ", event.V, ")")
 end
 
 
@@ -375,9 +388,13 @@ issatcut(cut) = cutcheck((_, e) -> e isa Event && !e.ispos, cut)
 
 TBW
 """
-function addeventtotoken!(token, e)
-    token.cut[e.process] = e
-    token.depend = max.(token.depend, e.V)
+function addeventtotoken!(token, ev)
+    if token.process == ev.process 
+        token.isvir = ev.isvir
+        token.type = ev.type
+    end
+    token.cut[ev.process] = ev
+    token.depend = max.(token.depend, ev.V)
 end
 
 """
@@ -429,8 +446,9 @@ function processtoken!(comms, waiting_tokens, token, i)
             # Not a consistent cut
             println("Process ", i, ": Inconsistent cut, target process: ", newprocess)
             # NOTE: potential issue
+            # token.target = (newprocess, :after, token.cut[newprocess].t)
             token.target = if isnothing(token.cut[newprocess])
-                (newprocess, :at, token.depend[newprocess])
+                (newprocess, :after, token.depend[newprocess])
             else
                 (newprocess, :after, token.cut[newprocess].t)
             end
@@ -444,32 +462,27 @@ end
     receiveevent!(events, comms, pos_intervals, waiting_tokens, e, ϵ)
 
 TBW
+Only local events will be received by receiveevent!
 """
 function receiveevent!(procevents, comms, pos_intervals, waiting_tokens, e, ϵ, i)
     # println("Process ", i, ": Received event")
     # save e in events
-    eventᵢ = searchsortedfirst(map(x -> x.t, procevents), e.t)
-    insert!(procevents, eventᵢ, e)
+    # updateProcevents!(procevents, e, i)
     # Should be up to date, just might need to create a virtual event
     for token ∈ copy(waiting_tokens)
         @match token.target begin
-            # FIXME
-            (e.process, :at, e.t) => begin # Process the event for the token
-                addeventtotoken!(token, e)
-                processtoken!(comms, waiting_tokens, token, i)
-            end
             (e.process, :after, t), if t < e.t end => begin # Process the event for the token
                 addeventtotoken!(token, e)
                 processtoken!(comms, waiting_tokens, token, i)
             end
-            (e.process, :at, t), if t < e.t end => begin # Time for a virtual event
-                n = length(token.cut)
-                event = addvirtevent!(procevents, pos_intervals, n, e.process, t, ϵ)
-                addeventtotoken!(token, event)
-                processtoken!(comms, waiting_tokens, token, i)
-            end
-            (e.process, :at, _) => continue # Don't do anything, our target hasn't shown up yet
-            _ => error("Something in the token's target isn't looking right: ", token.target)
+            # (e.process, :at, t), if t < e.t end => begin # Time for a virtual event
+            #     n = length(token.cut)
+            #     event = addvirtevent!(procevents, pos_intervals, n, e.process, t, ϵ)
+            #     addeventtotoken!(token, event)
+            #     processtoken!(comms, waiting_tokens, token, i)
+            # end
+            # (e.process, :at, _) => continue # Don't do anything, our target hasn't shown up yet
+            # _ => error("Something in the token's target isn't looking right: ", token.target)
         end
     end
 end
@@ -479,16 +492,26 @@ end
 
 TBW
 """
-function addvirtevent!(procevents, pos_intervals, n, i, t, ϵ)
-    println("Process ", i, ": Add virtual event at time: ", t)
-    eventᵢ = searchsortedfirst(map(x -> x.t, procevents), t)
-    new_id = string(i, "|", i, "|", t)
-    is_pos = ispos(pos_intervals, t)
-    new_V = fill(max(t - ϵ, 0.), n)
-    new_V[i] = t
-    new_event = Event(new_id, i, t, is_pos, new_V)
-    insert!(procevents, eventᵢ, new_event)
-    new_event
+function addvirtevent!(procevents, pos_intervals, n, i, vir_t, ϵ, type)
+    println("Process ", i, ": Add virtual event at time: ", vir_t)
+    
+    if type == :LEFT
+        vir_t -= ϵ
+    elseif type == :RIGHT
+        vir_t += ϵ
+    end
+
+    new_id = string(i, "|", i, "|", vir_t)
+    is_pos = ispos(pos_intervals, vir_t)
+    new_V = fill(max(vir_t - ϵ, 0.), n)
+    new_V[i] = vir_t
+    new_event = Event(new_id, i, vir_t, is_pos, new_V, true, type)
+    
+    ret_event = updateProcevents!(procevents, new_event, i)
+    # eventᵢ = searchsortedfirst(map(x -> x.t, procevents), vir_t)
+    # insert!(procevents, eventᵢ, new_event)
+    printEvent(ret_event, i, "addvirtevent")
+    ret_event
 end
 
 """
@@ -503,42 +526,60 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
         sat_cut = max.(map(c -> c.V, token.cut)...)
         println("Process ", i, ": Found a satisfying cut! Token ", repr(token.process), ", cut ", repr(sat_cut))
         token.target = (i, :after, token.cut[i].t)
+        token.isvir = nothing
+        token.type = nothing
+        return
     end
 
     index = searchsortedfirst(map(x -> x.t, procevents), token.target[3])
     if index > length(procevents)
         return
-        if token.target[2] === :at
-            # We're up to date, now we just need to wait for a new event
-            return
-        else # Target is :after
-            # There's an event which we've seen but didn't add to events
-            error("Why didn't this event get added to events? ", token.target[3])
-        end
     end
+        # if token.target[2] === :at
+        #     # We're up to date, now we just need to wait for a new event
+        #     return
+        # else # Target is :after
+        #     # There's an event which we've seen but didn't add to events
+        #     error("Why didn't this event get added to events? ", token.target[3])
+        # end
+
+
     println("Process ", i, ": Receive, solver_events: ", map(x -> x.t, procevents))
     println("Process ", i, ": Receive, index: ", index)
-    @match token.target begin # Careful, the order of these arms matter
-        (i, :after, procevents[end].t) => return # We're up to date, now we just need to wait for a new event
-        (i, :after, procevents[index].t) => begin # Found the event at events[index + 1], process it
+
+    if i == token.target[1]
+        if token.isvir == false
+            # create virtual event
+            vir_time = token.cut[token.process].t
+            vir_event = addvirtevent!(procevents, pos_intervals, length(token.cut), i, vir_time, ϵ, token.type)
+            addeventtotoken!(token, vir_event)
+            processtoken!(comms, waiting_tokens, token, i)
+        else
             println("Process ", i, ": Receive, route 1")
             addeventtotoken!(token, procevents[index + 1])
             processtoken!(comms, waiting_tokens, token, i)
         end
-        (i, :after, _) || (i, :at, procevents[index].t) => begin # Found the event at events[index], process it
-            println("Process ", i, ": Receive, route 2")
-            addeventtotoken!(token, procevents[index])
-            processtoken!(comms, waiting_tokens, token, i)
-        end
-        (i, :at, t) => begin # Didn't find it, need to create a virtual event
-            n = length(token.cut)
-            event = addvirtevent!(procevents, pos_intervals, n, i, t, ϵ)
-            addeventtotoken!(token, event)
-            processtoken!(comms, waiting_tokens, token, i)
-        end
-        _ => error("Something in the token's target isn't looking right: ", token.target)
     end
 end
+    # @match token.target begin # Careful, the order of these arms matter
+    #     (i, :after, procevents[end].t) => return # We're up to date, now we just need to wait for a new event
+    #     (i, :after, procevents[index].t) => begin # Found the event at events[index + 1], process it
+    #         println("Process ", i, ": Receive, route 1")
+    #         addeventtotoken!(token, procevents[index + 1])
+    #         processtoken!(comms, waiting_tokens, token, i)
+    #     end
+    #     # (i, :after, _) || (i, :at, procevents[index].t) => begin # Found the event at events[index], process it
+    #     #     println("Process ", i, ": Receive, route 2")
+    #     #     addeventtotoken!(token, procevents[index])
+    #     #     processtoken!(comms, waiting_tokens, token, i)
+    #     # end
+    #     # (i, :at, t) => begin # Didn't find it, need to create a virtual event
+    #     #     n = length(token.cut)
+    #     #     event = addvirtevent!(procevents, pos_intervals, n, i, t, ϵ)
+    #     #     addeventtotoken!(token, event)
+    #     #     processtoken!(comms, waiting_tokens, token, i)
+    #     # end
+    #     _ => error("Something in the token's target isn't looking right: ", token.target)
 
 """
     solver(comms, i, n, ϵ)
@@ -547,21 +588,24 @@ TBW
 """
 function solver(comms, i, n, ϵ) # Task
     # Init token
-    token = Token(i, [nothing for _ = 1:n], [0. for _ = 1:n], (i, :after, -1), nothing)
+    token = Token(i, [nothing for _ = 1:n], [0. for _ = 1:n], (i, :after, -1), nothing, nothing)
     procevents = []
     waiting_tokens = [token]
-    pos_intervals = []
+    pos_intervals_solver = []
     while true
         data = take!(comms[i])
         @match data begin
-            Comm(:newevent, e, _) => begin
-                (bound, t) = foundroot!(comms, procevents, e)
+            Comm(:newevent, e, pos_intervals) => begin
+                foundroot!(comms, procevents, e, i)
                 # Keep track of positive intervals for SAT of new events
-                updateintervals!(pos_intervals, bound, t)
+                pos_intervals_solver = pos_intervals
                 # Need to stay up to date with positive intervals in case we need to build any virtual events
-                receiveevent!(procevents, comms, pos_intervals, waiting_tokens, e, ϵ, i)
+                receiveevent!(procevents, comms, pos_intervals_solver, waiting_tokens, e, ϵ, i)
             end
-            Comm(:token, token, predtrue) => receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, i, ϵ, predtrue)
+            Comm(:token, token, predtrue) => begin
+                # printtoken(token, i, "Received token")
+                receivetoken!(procevents, comms, pos_intervals_solver, waiting_tokens, token, i, ϵ, predtrue)
+            end
         end
     end
 end
@@ -572,16 +616,17 @@ mutable struct Event
     t
     ispos
     V # Physical Vector Clock
-    type::Symbol
+    isvir
+    type
 end
 
-mutable struct Root
-    id
-    process
-    types
-    t
-    V
-end
+# mutable struct Root
+#     id
+#     process
+#     types
+#     t
+#     V
+# end
 
 # @enum EventType begin
 #     LEFT
@@ -590,10 +635,10 @@ end
 #     V_RIGHT
 # end
 
-@enum RootType begin
-    leftroot
-    rightroot
-end
+# @enum RootType begin
+#     leftroot
+#     rightroot
+# end
 
 struct Comm
     type::Symbol
@@ -603,10 +648,11 @@ end
 
 mutable struct Token
     process # owner
-    cut::Vector{Union{Root,Event,Nothing}}
+    cut::Vector{Union{Event,Nothing}}
     depend
     target # (process, :after, t)
-    type::Symbol
+    isvir
+    type
 end
 
 """
@@ -617,14 +663,16 @@ TBW
 function startmonitor(n, ϵ)
     # Comms for the abstractor
     # commsₐ = [Channel{Comm}(Inf) for _ = 1:n]
-    logs = [PriorityQueue() for _ = 1:n]
+    # logs = [PriorityQueue() for _ = 1:n]
 
     # Comms for the solver
     commsₛ = [Channel{Comm}(Inf) for _ = 1:n]
+    pos_intervals = [[] for _ = 1:n]
 
     for i in 1:n
-        errormonitor(@async process(commsₛ[i], i, n, ϵ))
+        errormonitor(@async process(commsₛ[i], i, n, ϵ, pos_intervals[i]))
         # errormonitor(@async abstractor!(commsₐ, commsₛ[i], logs[i], i, ϵ))
+        # FIXME commₛ[i]
         errormonitor(@async solver(commsₛ, i, n, ϵ))
     end
 
