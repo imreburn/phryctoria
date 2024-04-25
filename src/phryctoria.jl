@@ -6,8 +6,6 @@ using CSV
 
 export startmonitor, process, foundroot!
 
-colors = [:red, :blue, :green]
-
 """
     process(comm::Channel, i, n)
 
@@ -95,27 +93,29 @@ end
 Add an event to the log, cleaning up duplicates.
 """
 function updateProcevents!(procevents, new_event, i)
-    println("Process ", i, ": updateProcevents: ", map(x -> x.t, procevents))
-    printEvent(new_event, i, "updateProcevents")
+    # println("Process ", i, ": updateProcevents: ", map(x -> x.t, procevents))
+    # printEvent(new_event, i, "updateProcevents")
     # printEvent(new_event, i, "updateProc")
     for e ∈ procevents
         if e.t == new_event.t
             # when the duplicate is found
-            println("duplicate found!")
             @match (e.isvir, new_event.isvir) begin
-                (_, true) => return
-                (false, _) => return
+                (_, true) || (false, _) => begin
+                    println("duplicate: not replaced")
+                    return e
+                end
                 (_, false) => begin
                     # virtual event is replaced by local event
+                    println("duplicate: replace!")
                     tmp = replace(procevents, e=>new_event)
                     procevents = tmp
                     updateProceventsV!(procevents, length(event.V))
-                    return
+                    return new_event
                 end
             end
         end
     end
-    println("no duplicate found")
+    # println("no duplicate found")
     eventᵢ = searchsortedfirst(map(x -> x.t, procevents), new_event.t)
     insert!(procevents, eventᵢ, new_event)
     updateProceventsV!(procevents, length(new_event.V))
@@ -361,7 +361,7 @@ end
 
 function printEvent(event, i, fname)
     # println("Process ", i, ": ", fname, ": Token: (owner: ", token.process, "), (target: ",token.target, "),  (cut: ", getcut(token.cut), "), (depend: ", token.depend, "), (eval: ", getcut2(token.cut), ")")
-    println("Process ", i, ": ", fname, ": Event: (owner: ", event.process, "), (time: ",event.t, "),  (isvir?: ", event.isvir, "), (type: ", event.type, "), (PVC: ", event.V, ")")
+    println("Process ", i, ": ", fname, ": Event: (owner: ", event.process, "), (time: ",event.t, "),  (isvir?: ", event.isvir, "), (type: ", event.type, "), (PVC: ", event.V, "), (ispos: ", event.ispos, ")")
 end
 
 
@@ -390,8 +390,11 @@ TBW
 """
 function addeventtotoken!(token, ev)
     if token.process == ev.process 
-        token.isvir = ev.isvir
+        token.isvir = [ev.isvir for _ = 1:(length(token.cut))]
         token.type = ev.type
+    end
+    if ev.isvir == false
+        token.isvir[token.process] = true
     end
     token.cut[ev.process] = ev
     token.depend = max.(token.depend, ev.V)
@@ -492,15 +495,13 @@ end
 
 TBW
 """
-function addvirtevent!(procevents, pos_intervals, n, i, vir_t, ϵ, type)
-    println("Process ", i, ": Add virtual event at time: ", vir_t)
-    
+function addvirtevent!(procevents, pos_intervals, n, i, vir_t, ϵ, type)    
     if type == :LEFT
         vir_t -= ϵ
     elseif type == :RIGHT
         vir_t += ϵ
     end
-
+    println("Process ", i, ": Add virtual event at time: ", vir_t)
     new_id = string(i, "|", i, "|", vir_t)
     is_pos = ispos(pos_intervals, vir_t)
     new_V = fill(max(vir_t - ϵ, 0.), n)
@@ -526,13 +527,14 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
         sat_cut = max.(map(c -> c.V, token.cut)...)
         println("Process ", i, ": Found a satisfying cut! Token ", repr(token.process), ", cut ", repr(sat_cut))
         token.target = (i, :after, token.cut[i].t)
-        token.isvir = nothing
+        token.isvir = [nothing for _ = 1:(length(token.cut))]
         token.type = nothing
+        sendtoken!(comms[i], waiting_tokens, token, false, i)
         return
     end
 
     index = searchsortedfirst(map(x -> x.t, procevents), token.target[3])
-    if index > length(procevents)
+    if index >= length(procevents)
         return
     end
         # if token.target[2] === :at
@@ -548,8 +550,9 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
     println("Process ", i, ": Receive, index: ", index)
 
     if i == token.target[1]
-        if token.isvir == false
+        if token.isvir[i] == false
             # create virtual event
+            token.isvir[i] = true
             vir_time = token.cut[token.process].t
             vir_event = addvirtevent!(procevents, pos_intervals, length(token.cut), i, vir_time, ϵ, token.type)
             addeventtotoken!(token, vir_event)
@@ -588,7 +591,7 @@ TBW
 """
 function solver(comms, i, n, ϵ) # Task
     # Init token
-    token = Token(i, [nothing for _ = 1:n], [0. for _ = 1:n], (i, :after, -1), nothing, nothing)
+    token = Token(i, [nothing for _ = 1:n], [0. for _ = 1:n], (i, :after, -1), [nothing for _ = 1:n], nothing)
     procevents = []
     waiting_tokens = [token]
     pos_intervals_solver = []
