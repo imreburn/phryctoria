@@ -355,14 +355,16 @@ function getcut2(cut)
     cutpos    
 end
 
-function printtoken(token, i, fname)
-    println("Process ", i, ": ", fname, ": Token: (owner: ", token.process, "), (target: ",token.target, "),  (cut: ", getcut(token.cut), "), (depend: ", token.depend, "), (eval: ", getcut2(token.cut), "), (isvir: ", token.isvir, "), (type: ", token.type, ")")
-end
-
 function printEvent(event, i, fname)
     # println("Process ", i, ": ", fname, ": Token: (owner: ", token.process, "), (target: ",token.target, "),  (cut: ", getcut(token.cut), "), (depend: ", token.depend, "), (eval: ", getcut2(token.cut), ")")
-    println("Process ", i, ": ", fname, ": Event: (owner: ", event.process, "), (time: ",event.t, "),  (isvir?: ", event.isvir, "), (type: ", event.type, "), (PVC: ", event.V, "), (ispos: ", event.ispos, ")")
+    println("Process ", i, ": ", fname, ": Event: (owner: ", event.process, ", time: ",event.t, ", isvir?: ", event.isvir, ", type: ", event.type, ", PVC: ", event.V, ", ispos: ", event.ispos, ")")
 end
+
+function printtoken(token, i, fname)
+    println("Process ", i, ": ", fname, ": Token: (owner: ", token.process, ", target: ",token.target, ", cut: ", getcut(token.cut), ", depend: ", token.depend, ", eval: ", getcut2(token.cut), ", isvir: ", token.isvir, ", type: ", token.type, ")")
+end
+
+
 
 
 """
@@ -388,14 +390,16 @@ issatcut(cut) = cutcheck((_, e) -> e isa Event && !e.ispos, cut)
 
 TBW
 """
-function addeventtotoken!(token, ev)
+function addeventtotoken!(token, ev, i)
     if token.process == ev.process 
-        token.isvir = [ev.isvir for _ = 1:(length(token.cut))]
+        token.isvir = ev.isvir
         token.type = ev.type
     end
-    if ev.isvir == false
-        token.isvir[token.process] = true
-    end
+    # if ev.isvir == false
+    #     token.isvir[token.process] = true
+    # end
+    printEvent(ev, i, "Add Event to Token")
+    printtoken(token, i, "Add Event to Token")
     token.cut[ev.process] = ev
     token.depend = max.(token.depend, ev.V)
 end
@@ -407,6 +411,7 @@ TBW
 """
 function sendtoken!(comm, waiting_tokens, token, predeval, i)
     printtoken(token, i, "Send")
+    println()
     token_position = findfirst(x -> x.process == token.process, waiting_tokens)
     deleteat!(waiting_tokens, token_position)
     put!(comm, Comm(:token, token, predeval))
@@ -418,7 +423,7 @@ end
 TBW
 """
 function evaluatetoken!(comms, waiting_tokens, token, i)
-    printtoken(token, i, "Evaluate")
+    # printtoken(token, i, "Evaluate")
     @match issatcut(token.cut) begin
         true => begin
             println("Process ", i, ": Evaluate token: Sat cut!")
@@ -448,13 +453,13 @@ function processtoken!(comms, waiting_tokens, token, i)
         (false, newprocess) => begin
             # Not a consistent cut
             println("Process ", i, ": Inconsistent cut, target process: ", newprocess)
-            # NOTE: potential issue
-            # token.target = (newprocess, :after, token.cut[newprocess].t)
-            token.target = if isnothing(token.cut[newprocess])
-                (newprocess, :after, token.depend[newprocess])
-            else
-                (newprocess, :after, token.cut[newprocess].t)
-            end
+            # NOTE: Optimization?
+            token.target = (newprocess, :after, token.depend[newprocess])
+            # token.target = if isnothing(token.cut[newprocess])
+            #     (newprocess, :after, token.depend[newprocess])
+            # else
+            #     (newprocess, :after, token.cut[newprocess].t)
+            # end
             sendtoken!(comms[newprocess], waiting_tokens, token, false, i)
         end
         _ => error("isconsistentcut() API not what we're expecting!")
@@ -472,21 +477,30 @@ function receiveevent!(procevents, comms, pos_intervals, waiting_tokens, e, ϵ, 
     # save e in events
     # updateProcevents!(procevents, e, i)
     # Should be up to date, just might need to create a virtual event
+    printEvent(e, i, "Receive Event")
     for token ∈ copy(waiting_tokens)
-        @match token.target begin
-            (e.process, :after, t), if t < e.t end => begin # Process the event for the token
-                addeventtotoken!(token, e)
-                processtoken!(comms, waiting_tokens, token, i)
-            end
-            # (e.process, :at, t), if t < e.t end => begin # Time for a virtual event
-            #     n = length(token.cut)
-            #     event = addvirtevent!(procevents, pos_intervals, n, e.process, t, ϵ)
-            #     addeventtotoken!(token, event)
-            #     processtoken!(comms, waiting_tokens, token, i)
-            # end
-            # (e.process, :at, _) => continue # Don't do anything, our target hasn't shown up yet
-            # _ => error("Something in the token's target isn't looking right: ", token.target)
+        if token.target[1] == e.process
+            for ev ∈ procevents
+                if token.target[3] < ev.t
+                    addeventtotoken!(token, ev, i)
+                    processtoken!(comms, waiting_tokens, token, i)
+                end
+            end     
         end
+        # @match token.target begin
+        #     (e.process, :after, t), if t < e.t end => begin # Process the event for the token
+        #         addeventtotoken!(token, e, i)
+        #         processtoken!(comms, waiting_tokens, token, i)
+        #     end
+        #     # (e.process, :at, t), if t < e.t end => begin # Time for a virtual event
+        #     #     n = length(token.cut)
+        #     #     event = addvirtevent!(procevents, pos_intervals, n, e.process, t, ϵ)
+        #     #     addeventtotoken!(token, event)
+        #     #     processtoken!(comms, waiting_tokens, token, i)
+        #     # end
+        #     # (e.process, :at, _) => continue # Don't do anything, our target hasn't shown up yet
+        #     # _ => error("Something in the token's target isn't looking right: ", token.target)
+        # end
     end
 end
 
@@ -496,14 +510,17 @@ end
 TBW
 """
 function addvirtevent!(procevents, pos_intervals, n, i, vir_t, ϵ, type)    
-    if type == :LEFT
-        vir_t -= ϵ
-    elseif type == :RIGHT
-        vir_t += ϵ
+    # if type == :LEFT
+    #     vir_t -= ϵ
+    # elseif type == :RIGHT
+    #     vir_t += ϵ
+    # end
+    is_pos = ispos(pos_intervals, vir_t)
+    if is_pos == false
+        return nothing
     end
     println("Process ", i, ": Add virtual event at time: ", vir_t)
     new_id = string(i, "|", i, "|", vir_t)
-    is_pos = ispos(pos_intervals, vir_t)
     new_V = fill(max(vir_t - ϵ, 0.), n)
     new_V[i] = vir_t
     new_event = Event(new_id, i, vir_t, is_pos, new_V, true, type)
@@ -527,16 +544,17 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
         sat_cut = max.(map(c -> c.V, token.cut)...)
         println("Process ", i, ": Found a satisfying cut! Token ", repr(token.process), ", cut ", repr(sat_cut))
         token.target = (i, :after, token.cut[i].t)
-        token.isvir = [nothing for _ = 1:(length(token.cut))]
+        token.isvir = nothing
+        # token.isvir = [nothing for _ = 1:(length(token.cut))]
         token.type = nothing
         sendtoken!(comms[i], waiting_tokens, token, false, i)
         return
     end
 
-    index = searchsortedfirst(map(x -> x.t, procevents), token.target[3])
-    if index >= length(procevents)
-        return
-    end
+    # index = searchsortedfirst(map(x -> x.t, procevents), token.target[3])
+    # if index >= length(procevents)
+    #     return
+    # end
         # if token.target[2] === :at
         #     # We're up to date, now we just need to wait for a new event
         #     return
@@ -546,23 +564,62 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
         # end
 
 
-    println("Process ", i, ": Receive, solver_events: ", map(x -> x.t, procevents))
-    println("Process ", i, ": Receive, index: ", index)
-
+    println("Process ", i, ": Receive: solver_events: ", map(x -> x.t, procevents))
     if i == token.target[1]
-        if token.isvir[i] == false
-            # create virtual event
-            token.isvir[i] = true
-            vir_time = token.cut[token.process].t
+        need_vir = false
+        vir_time = token.cut[token.process].t
+        if token.isvir == false && i != token.process
+            need_vir = true
+            # check if we need to add virtual event
+            if token.type == :LEFT
+                vir_time -= ϵ
+            elseif token.type == :RIGHT 
+                vir_time += ϵ
+            end
+            
+            for e ∈ procevents
+                if e.t == vir_time  
+                    need_vir = false
+                    break
+                end
+            end
+        end
+
+        println("Process ", i, ": need to create vir event? ", need_vir)    
+        if need_vir
             vir_event = addvirtevent!(procevents, pos_intervals, length(token.cut), i, vir_time, ϵ, token.type)
-            addeventtotoken!(token, vir_event)
-            processtoken!(comms, waiting_tokens, token, i)
-        else
-            println("Process ", i, ": Receive, route 1")
-            addeventtotoken!(token, procevents[index + 1])
-            processtoken!(comms, waiting_tokens, token, i)
+            if !isnothing(vir_event)
+                addeventtotoken!(token, vir_event, i)
+                processtoken!(comms, waiting_tokens, token, i)
+                return
+            else
+                println("Process ", i, ": virtual event false. Skip!")    
+            end
+        end
+        
+        for ev ∈ procevents
+            if token.target[3] < ev.t
+                addeventtotoken!(token, ev, i)
+                processtoken!(comms, waiting_tokens, token, i)
+                return
+            end
         end
     end
+
+    # if i == token.target[1]
+    #     if token.isvir[i] == false
+    #         # create virtual event
+    #         token.isvir[i] = true
+    #         vir_time = token.cut[token.process].t
+    #         vir_event = addvirtevent!(procevents, pos_intervals, length(token.cut), i, vir_time, ϵ, token.type)
+    #         addeventtotoken!(token, vir_event)
+    #         processtoken!(comms, waiting_tokens, token, i)
+    #     else
+    #         # println("Process ", i, ": Receive, route 1")
+    #         addeventtotoken!(token, procevents[index + 1])
+    #         processtoken!(comms, waiting_tokens, token, i)
+    #     end
+    # end
 end
     # @match token.target begin # Careful, the order of these arms matter
     #     (i, :after, procevents[end].t) => return # We're up to date, now we just need to wait for a new event
