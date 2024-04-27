@@ -1,5 +1,7 @@
+#!/usr/bin/env python3
 import os
 import matplotlib.pyplot as plt
+# import matplotlib.patheffects as pe
 import csv
 
 from pathlib import Path
@@ -7,7 +9,7 @@ from pathlib import Path
 p = list(sorted(Path(os.getcwd()).parent.glob('*.txt')))
 n = len(p)
 fig, axs = plt.subplots(n)
-print(p)
+
 for index, filename in enumerate(p):
     t = []
     x = []
@@ -25,10 +27,6 @@ for index, filename in enumerate(p):
                 t.append(loc)
                 x.append(0)
 
-        print(t)
-        print(x)
-        # print(zeros)
-
         t1 = [t0 for t0, _ in sorted(zip(t, x))]
         x1 = [x0 for _, x0 in sorted(zip(t, x))]
         for i in range(1, len(x1)):
@@ -40,6 +38,7 @@ for index, filename in enumerate(p):
         print(t1)
         print(x1)
 
+        bbox = dict(facecolor='w', alpha=0.5, edgecolor='none')
         # print(filename.name)
         axs[index].plot(t1, x1)
         axs[index].set_title(filename.name)
@@ -48,7 +47,7 @@ for index, filename in enumerate(p):
         axs[index].get_yaxis().set_visible(False)
         for t0, x0 in zip(t1, x1):
             if x0 == 0:
-                axs[index].annotate('%s' % t0, xy=(t0, x0), textcoords='data')
+                axs[index].annotate('%s' % t0, xy=(t0, x0), textcoords='data', weight='bold', backgroundcolor='w', bbox=bbox)
 
 plt.tight_layout()
 plt.show()
