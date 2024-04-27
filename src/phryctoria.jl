@@ -356,7 +356,6 @@ function getcut2(cut)
 end
 
 function printEvent(event, i, fname)
-    # println("Process ", i, ": ", fname, ": Token: (owner: ", token.process, "), (target: ",token.target, "),  (cut: ", getcut(token.cut), "), (depend: ", token.depend, "), (eval: ", getcut2(token.cut), ")")
     println("Process ", i, ": ", fname, ": Event: (owner: ", event.process, ", time: ",event.t, ", isvir?: ", event.isvir, ", type: ", event.type, ", PVC: ", event.V, ", ispos: ", event.ispos, ")")
 end
 
@@ -473,10 +472,8 @@ TBW
 Only local events will be received by receiveevent!
 """
 function receiveevent!(procevents, comms, pos_intervals, waiting_tokens, e, ϵ, i)
-    # println("Process ", i, ": Received event")
     # save e in events
     # updateProcevents!(procevents, e, i)
-    # Should be up to date, just might need to create a virtual event
     printEvent(e, i, "Receive Event")
     for token ∈ copy(waiting_tokens)
         if token.target[1] == e.process
@@ -487,20 +484,6 @@ function receiveevent!(procevents, comms, pos_intervals, waiting_tokens, e, ϵ, 
                 end
             end     
         end
-        # @match token.target begin
-        #     (e.process, :after, t), if t < e.t end => begin # Process the event for the token
-        #         addeventtotoken!(token, e, i)
-        #         processtoken!(comms, waiting_tokens, token, i)
-        #     end
-        #     # (e.process, :at, t), if t < e.t end => begin # Time for a virtual event
-        #     #     n = length(token.cut)
-        #     #     event = addvirtevent!(procevents, pos_intervals, n, e.process, t, ϵ)
-        #     #     addeventtotoken!(token, event)
-        #     #     processtoken!(comms, waiting_tokens, token, i)
-        #     # end
-        #     # (e.process, :at, _) => continue # Don't do anything, our target hasn't shown up yet
-        #     # _ => error("Something in the token's target isn't looking right: ", token.target)
-        # end
     end
 end
 
@@ -515,6 +498,7 @@ function addvirtevent!(procevents, pos_intervals, n, i, vir_t, ϵ, type)
     # elseif type == :RIGHT
     #     vir_t += ϵ
     # end
+    # NOTE: Optimization: do not add false event
     is_pos = ispos(pos_intervals, vir_t)
     if is_pos == false
         return nothing
@@ -568,15 +552,16 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
     if i == token.target[1]
         need_vir = false
         vir_time = token.cut[token.process].t
+        # check if we need to add virtual event
         if token.isvir == false && i != token.process
+            # This token is trying to complete a real event!
             need_vir = true
-            # check if we need to add virtual event
             if token.type == :LEFT
                 vir_time -= ϵ
             elseif token.type == :RIGHT 
                 vir_time += ϵ
             end
-            
+            # If there is already an event at vir_time, do not add virtual event
             for e ∈ procevents
                 if e.t == vir_time  
                     need_vir = false
@@ -593,10 +578,12 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
                 processtoken!(comms, waiting_tokens, token, i)
                 return
             else
+                # if nothing is returned, virtual event's predicate is false
                 println("Process ", i, ": virtual event false. Skip!")    
             end
         end
         
+        # If virtual event is not added, try to find the next event
         for ev ∈ procevents
             if token.target[3] < ev.t
                 addeventtotoken!(token, ev, i)
@@ -605,41 +592,7 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
             end
         end
     end
-
-    # if i == token.target[1]
-    #     if token.isvir[i] == false
-    #         # create virtual event
-    #         token.isvir[i] = true
-    #         vir_time = token.cut[token.process].t
-    #         vir_event = addvirtevent!(procevents, pos_intervals, length(token.cut), i, vir_time, ϵ, token.type)
-    #         addeventtotoken!(token, vir_event)
-    #         processtoken!(comms, waiting_tokens, token, i)
-    #     else
-    #         # println("Process ", i, ": Receive, route 1")
-    #         addeventtotoken!(token, procevents[index + 1])
-    #         processtoken!(comms, waiting_tokens, token, i)
-    #     end
-    # end
 end
-    # @match token.target begin # Careful, the order of these arms matter
-    #     (i, :after, procevents[end].t) => return # We're up to date, now we just need to wait for a new event
-    #     (i, :after, procevents[index].t) => begin # Found the event at events[index + 1], process it
-    #         println("Process ", i, ": Receive, route 1")
-    #         addeventtotoken!(token, procevents[index + 1])
-    #         processtoken!(comms, waiting_tokens, token, i)
-    #     end
-    #     # (i, :after, _) || (i, :at, procevents[index].t) => begin # Found the event at events[index], process it
-    #     #     println("Process ", i, ": Receive, route 2")
-    #     #     addeventtotoken!(token, procevents[index])
-    #     #     processtoken!(comms, waiting_tokens, token, i)
-    #     # end
-    #     # (i, :at, t) => begin # Didn't find it, need to create a virtual event
-    #     #     n = length(token.cut)
-    #     #     event = addvirtevent!(procevents, pos_intervals, n, i, t, ϵ)
-    #     #     addeventtotoken!(token, event)
-    #     #     processtoken!(comms, waiting_tokens, token, i)
-    #     # end
-    #     _ => error("Something in the token's target isn't looking right: ", token.target)
 
 """
     solver(comms, i, n, ϵ)
@@ -732,7 +685,6 @@ function startmonitor(n, ϵ)
     for i in 1:n
         errormonitor(@async process(commsₛ[i], i, n, ϵ, pos_intervals[i]))
         # errormonitor(@async abstractor!(commsₐ, commsₛ[i], logs[i], i, ϵ))
-        # FIXME commₛ[i]
         errormonitor(@async solver(commsₛ, i, n, ϵ))
     end
 
