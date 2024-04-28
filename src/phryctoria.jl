@@ -170,7 +170,7 @@ function foundroot!(comms, procevents, new_event, i)
     # printEvent(new_event, 0)
     updateProcevents!(procevents, new_event, i)
 
-    # NOTE maybe we need to fix it later
+    # 
     # Return type is used for determining positive intervals
     # bound = if event.type == :LEFT && event.type == :RIGHT
     #     :both
@@ -408,9 +408,10 @@ end
 
 TBW
 """
-function sendtoken!(comm, waiting_tokens, token, predeval, i)
+function sendtoken!(comm, waiting_tokens, token, predeval, i, count_send)
     printtoken(token, i, "Send")
-    println()
+    count_send[i] += 1
+    println("Process ", i, ": Token sent ", count_send[i], " times")
     token_position = findfirst(x -> x.process == token.process, waiting_tokens)
     deleteat!(waiting_tokens, token_position)
     put!(comm, Comm(:token, token, predeval))
@@ -421,17 +422,17 @@ end
 
 TBW
 """
-function evaluatetoken!(comms, waiting_tokens, token, i)
+function evaluatetoken!(comms, waiting_tokens, token, i, count_send)
     # printtoken(token, i, "Evaluate")
     @match issatcut(token.cut) begin
         true => begin
             println("Process ", i, ": Evaluate token: Sat cut!")
-            sendtoken!(comms[token.process], waiting_tokens, token, true, i) # Found a satisfying cut! Send the token home
+            sendtoken!(comms[token.process], waiting_tokens, token, true, i, count_send) # Found a satisfying cut! Send the token home
         end
         (false, forbidprocess) => begin # Not a satisfying cut
             println("Process ", i, ": Evaluate token: Not a satcut! forbid process: ", forbidprocess)
             token.target = (forbidprocess, :after, token.cut[forbidprocess].t)
-            sendtoken!(comms[forbidprocess], waiting_tokens, token, false, i)
+            sendtoken!(comms[forbidprocess], waiting_tokens, token, false, i, count_send)
         end
         _ => error("issatcut() API not what we're expecting!")
     end
@@ -442,24 +443,24 @@ end
 
 TBW
 """
-function processtoken!(comms, waiting_tokens, token, i)
+function processtoken!(comms, waiting_tokens, token, i, count_send)
     printtoken(token, i, "Process")
     @match isconsistentcut(token.cut, token.depend) begin
         true => begin
             println("Process ", i, ": Consistent cut")
-            evaluatetoken!(comms, waiting_tokens, token, i) # We have a consistent cut
+            evaluatetoken!(comms, waiting_tokens, token, i, count_send) # We have a consistent cut
         end 
         (false, newprocess) => begin
             # Not a consistent cut
             println("Process ", i, ": Inconsistent cut, target process: ", newprocess)
-            # NOTE: Optimization?
-            token.target = (newprocess, :after, token.depend[newprocess])
-            # token.target = if isnothing(token.cut[newprocess])
-            #     (newprocess, :after, token.depend[newprocess])
-            # else
-            #     (newprocess, :after, token.cut[newprocess].t)
-            # end
-            sendtoken!(comms[newprocess], waiting_tokens, token, false, i)
+            # NOTE: Optimization 2: target is set by depend
+            # token.target = (newprocess, :after, token.depend[newprocess])
+            token.target = if isnothing(token.cut[newprocess]) || token.depend[newprocess] > token.cut[newprocess].t
+                (newprocess, :at, token.depend[newprocess])
+            else
+                (newprocess, :after, token.cut[newprocess].t)
+            end
+            sendtoken!(comms[newprocess], waiting_tokens, token, false, i, count_send)
         end
         _ => error("isconsistentcut() API not what we're expecting!")
     end
@@ -471,19 +472,21 @@ end
 TBW
 Only local events will be received by receiveevent!
 """
-function receiveevent!(procevents, comms, pos_intervals, waiting_tokens, e, ϵ, i)
+function receiveevent!(procevents, comms, pos_intervals, waiting_tokens, e, ϵ, i, count_send)
     # save e in events
     # updateProcevents!(procevents, e, i)
     printEvent(e, i, "Receive Event")
     for token ∈ copy(waiting_tokens)
-        if token.target[1] == e.process
-            for ev ∈ procevents
-                if token.target[3] < ev.t
-                    addeventtotoken!(token, ev, i)
-                    processtoken!(comms, waiting_tokens, token, i)
-                end
-            end     
-        end
+        @match token begin
+            (e.process, :at, t), if t == e.t end => begin
+                addeventtotoken!(token, e, i)
+                processtoken!(comms, waiting_tokens, token, i, count_send)
+            end
+            (e.process, :after, t), if t < e.t end => begin
+                addeventtotoken!(token, e, i)
+                processtoken!(comms, waiting_tokens, token, i, count_send)
+            end
+        end     
     end
 end
 
@@ -493,12 +496,7 @@ end
 TBW
 """
 function addvirtevent!(procevents, pos_intervals, n, i, vir_t, ϵ, type)    
-    # if type == :LEFT
-    #     vir_t -= ϵ
-    # elseif type == :RIGHT
-    #     vir_t += ϵ
-    # end
-    # NOTE: Optimization: do not add false event
+    # NOTE: Optimization 1: do not add false virtual event
     is_pos = ispos(pos_intervals, vir_t)
     if is_pos == false
         return nothing
@@ -521,7 +519,7 @@ end
 
 TBW
 """
-function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, i, ϵ, predtrue)
+function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, i, ϵ, predtrue, count_send)
     printtoken(token, i, "Receive")
     push!(waiting_tokens, token)
     if predtrue && token.process == i
@@ -531,7 +529,7 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
         token.isvir = nothing
         # token.isvir = [nothing for _ = 1:(length(token.cut))]
         token.type = nothing
-        sendtoken!(comms[i], waiting_tokens, token, false, i)
+        sendtoken!(comms[i], waiting_tokens, token, false, i, count_send)
         return
     end
 
@@ -575,7 +573,7 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
             vir_event = addvirtevent!(procevents, pos_intervals, length(token.cut), i, vir_time, ϵ, token.type)
             if !isnothing(vir_event)
                 addeventtotoken!(token, vir_event, i)
-                processtoken!(comms, waiting_tokens, token, i)
+                processtoken!(comms, waiting_tokens, token, i, count_send)
                 return
             else
                 # if nothing is returned, virtual event's predicate is false
@@ -583,12 +581,33 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
             end
         end
         
-        # If virtual event is not added, try to find the next event
+        at_event = false
+        if token.target[2] == :at
+            for ev ∈ procevents
+                if ev.t == token.target[3]
+                    println("Process ", i, ": :at event found!")
+                    at_event = true
+                    break
+                end
+            end
+            if (!at_event)
+                println("Process ", i, ": :at event not found. Check if virtual event is necessary")
+                println("Process ", i, ": predicate (:at): ", ispos(pos_intervals, token.target[3]))
+            end
+        end
+
         for ev ∈ procevents
-            if token.target[3] < ev.t
-                addeventtotoken!(token, ev, i)
-                processtoken!(comms, waiting_tokens, token, i)
-                return
+            @match token begin
+                (_, :at, t), if t <= ev.t end => begin # FIXME < should be removed
+                    addeventtotoken!(token, ev, i)
+                    processtoken!(comms, waiting_tokens, token, i, count_send)
+                    return
+                end
+                (_, :after, t), if t < ev.t end => begin
+                    addeventtotoken!(token, ev, i)
+                    processtoken!(comms, waiting_tokens, token, i, count_send)
+                    return
+                end
             end
         end
     end
@@ -599,7 +618,7 @@ end
 
 TBW
 """
-function solver(comms, i, n, ϵ) # Task
+function solver(comms, i, n, ϵ, count_send_token) # Task
     # Init token
     token = Token(i, [nothing for _ = 1:n], [0. for _ = 1:n], (i, :after, -1), [nothing for _ = 1:n], nothing)
     procevents = []
@@ -613,11 +632,11 @@ function solver(comms, i, n, ϵ) # Task
                 # Keep track of positive intervals for SAT of new events
                 pos_intervals_solver = pos_intervals
                 # Need to stay up to date with positive intervals in case we need to build any virtual events
-                receiveevent!(procevents, comms, pos_intervals_solver, waiting_tokens, e, ϵ, i)
+                receiveevent!(procevents, comms, pos_intervals_solver, waiting_tokens, e, ϵ, i, count_send_token)
             end
             Comm(:token, token, predtrue) => begin
                 # printtoken(token, i, "Received token")
-                receivetoken!(procevents, comms, pos_intervals_solver, waiting_tokens, token, i, ϵ, predtrue)
+                receivetoken!(procevents, comms, pos_intervals_solver, waiting_tokens, token, i, ϵ, predtrue, count_send_token)
             end
         end
     end
@@ -663,7 +682,7 @@ mutable struct Token
     process # owner
     cut::Vector{Union{Event,Nothing}}
     depend
-    target # (process, :after, t)
+    target # (process, :at/:after, t)
     isvir
     type
 end
@@ -681,11 +700,12 @@ function startmonitor(n, ϵ)
     # Comms for the solver
     commsₛ = [Channel{Comm}(Inf) for _ = 1:n]
     pos_intervals = [[] for _ = 1:n]
+    count_send_token = [0 for _ = 1:n]
 
     for i in 1:n
         errormonitor(@async process(commsₛ[i], i, n, ϵ, pos_intervals[i]))
         # errormonitor(@async abstractor!(commsₐ, commsₛ[i], logs[i], i, ϵ))
-        errormonitor(@async solver(commsₛ, i, n, ϵ))
+        errormonitor(@async solver(commsₛ, i, n, ϵ, count_send_token))
     end
 
     # Every agent async:
