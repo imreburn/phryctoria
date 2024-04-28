@@ -1,0 +1,3 @@
+[submodule "signals"]
+	path = signals
+	url = git@github.com:sabotagelab/phryctoria_test_signals.git
