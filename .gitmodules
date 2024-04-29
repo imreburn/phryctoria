@@ -2,5 +2,5 @@
 	path = signlas
 	url = git@github.com:sabotagelab/phryctoria_test_signals.git
 [submodule "signals"]
-	path = signals
+	path = test_cases
 	url = git@github.com:sabotagelab/phryctoria_test_signals.git
