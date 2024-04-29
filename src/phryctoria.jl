@@ -410,7 +410,10 @@ TBW
 """
 function sendtoken!(comm, waiting_tokens, token, predeval, i, count_send)
     printtoken(token, i, "Send")
-    count_send[i] += 1
+    # Do not count if the token is sent to myself
+    if i != token.target[1]
+        count_send[i] += 1
+    end
     println("Process ", i, ": Token sent ", count_send[i], " times")
     token_position = findfirst(x -> x.process == token.process, waiting_tokens)
     deleteat!(waiting_tokens, token_position)
@@ -477,7 +480,8 @@ function receiveevent!(procevents, comms, pos_intervals, waiting_tokens, e, ϵ, 
     # updateProcevents!(procevents, e, i)
     printEvent(e, i, "Receive Event")
     for token ∈ copy(waiting_tokens)
-        @match token begin
+        printtoken(token, i, "Current Token")
+        @match token.target begin
             (e.process, :at, t), if t == e.t end => begin
                 addeventtotoken!(token, e, i)
                 processtoken!(comms, waiting_tokens, token, i, count_send)
@@ -586,28 +590,32 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
             for ev ∈ procevents
                 if ev.t == token.target[3]
                     println("Process ", i, ": :at event found!")
+                    addeventtotoken!(token, ev, i)
+                    processtoken!(comms, waiting_tokens, token, i, count_send)
                     at_event = true
-                    break
+                    return
                 end
             end
             if (!at_event)
                 println("Process ", i, ": :at event not found. Check if virtual event is necessary")
-                println("Process ", i, ": predicate (:at): ", ispos(pos_intervals, token.target[3]))
+                check_pos = ispos(pos_intervals, token.target[3])
+                println("Process ", i, ": predicate (:at): ", check_pos)
+                if at_event == false && check_pos == false
+                    token.target = (token.target[1], :after, token.target[3])
+                end
             end
         end
 
+        
+        # if check_pos == false
+        #     token.target[2] = :after
+        # end
+        # always :after
         for ev ∈ procevents
-            @match token begin
-                (_, :at, t), if t <= ev.t end => begin # FIXME < should be removed
-                    addeventtotoken!(token, ev, i)
-                    processtoken!(comms, waiting_tokens, token, i, count_send)
-                    return
-                end
-                (_, :after, t), if t < ev.t end => begin
-                    addeventtotoken!(token, ev, i)
-                    processtoken!(comms, waiting_tokens, token, i, count_send)
-                    return
-                end
+            if token.target[3] < ev.t
+                addeventtotoken!(token, ev, i)
+                processtoken!(comms, waiting_tokens, token, i, count_send)
+                break
             end
         end
     end
