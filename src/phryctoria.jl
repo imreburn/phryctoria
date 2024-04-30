@@ -11,8 +11,8 @@ export startmonitor, process, foundroot!
 
 A process which receives signal data, and as it finds roots sends them to the abstractor.
 """
-function process(comm::Channel, i, n, ϵ, pos_intervals) # Task
-    filename = normpath("signals/signal" * string(i) * ".txt")
+function process(comm::Channel, i, n, ϵ, pos_intervals, k) # Task
+    filename = normpath("test_cases/example" * string(k) * "/signal" * string(i) * ".txt")
     data = []
     # While a signal exists
     for row ∈ CSV.Rows(filename; delim=',', types=Float64)
@@ -49,7 +49,7 @@ function process(comm::Channel, i, n, ϵ, pos_intervals) # Task
             else
                 :neither
             end
-            printEvent(root_event, i, "Local process")
+            # printEvent(root_event, i, "Local process")
             # println("Process ", i, ": pos_intervals(before): ", pos_intervals)    
             updateintervals!(pos_intervals, bound, root_event.t)
             # println("Process ", i, ": pos_intervals(after): ", pos_intervals)    
@@ -64,7 +64,7 @@ end
 Combine two events occurring on the same process at the same time to just one event.
 """
 # function combine(e₁, e₂)
-#     println("combine")
+    # println("combine")
 #     @match (e₁, e₂) begin
 #         (Root(id₁, pid, types, t, V₁), Event(_, pid, t, _, V₂)) ||
 #             (Event(_, pid, t, _, V₂), Root(id₁, pid, types, t, V₁)) => Root(id₁, pid, types, t, max.(V₁, V₂))
@@ -101,12 +101,12 @@ function updateProcevents!(procevents, new_event, i)
             # when the duplicate is found
             @match (e.isvir, new_event.isvir) begin
                 (_, true) || (false, _) => begin
-                    println("duplicate: not replaced")
+                    # println("duplicate: not replaced")
                     return e
                 end
                 (_, false) => begin
                     # virtual event is replaced by local event
-                    println("duplicate: replace!")
+                    # println("duplicate: replace!")
                     tmp = replace(procevents, e=>new_event)
                     procevents = tmp
                     updateProceventsV!(procevents, length(event.V))
@@ -235,7 +235,7 @@ TBW
 #         # Update vector clock to be consistent with ϵ
 #         event.V = max.(event.t - ϵ, event.V)
 
-#         println("Process ", i, ": Sending event ", repr(event.V), " to solver")
+        # println("Process ", i, ": Sending event ", repr(event.V), " to solver")
 #         put!(solver_comm, Comm(:newevent, event, pos_intervals))
 #     end
 # end
@@ -397,8 +397,8 @@ function addeventtotoken!(token, ev, i)
     # if ev.isvir == false
     #     token.isvir[token.process] = true
     # end
-    printEvent(ev, i, "Add Event to Token")
-    printtoken(token, i, "Add Event to Token")
+    # printEvent(ev, i, "Add Event to Token")
+    # printtoken(token, i, "Add Event to Token")
     token.cut[ev.process] = ev
     token.depend = max.(token.depend, ev.V)
 end
@@ -409,7 +409,7 @@ end
 TBW
 """
 function sendtoken!(comm, waiting_tokens, token, predeval, i, count_send)
-    printtoken(token, i, "Send")
+    # printtoken(token, i, "Send")
     # Do not count if the token is sent to myself
     if i != token.target[1]
         count_send[i] += 1
@@ -429,11 +429,11 @@ function evaluatetoken!(comms, waiting_tokens, token, i, count_send)
     # printtoken(token, i, "Evaluate")
     @match issatcut(token.cut) begin
         true => begin
-            println("Process ", i, ": Evaluate token: Sat cut!")
+            # println("Process ", i, ": Evaluate token: Sat cut!")
             sendtoken!(comms[token.process], waiting_tokens, token, true, i, count_send) # Found a satisfying cut! Send the token home
         end
         (false, forbidprocess) => begin # Not a satisfying cut
-            println("Process ", i, ": Evaluate token: Not a satcut! forbid process: ", forbidprocess)
+            # println("Process ", i, ": Evaluate token: Not a satcut! forbid process: ", forbidprocess)
             token.target = (forbidprocess, :after, token.cut[forbidprocess].t)
             sendtoken!(comms[forbidprocess], waiting_tokens, token, false, i, count_send)
         end
@@ -447,22 +447,29 @@ end
 TBW
 """
 function processtoken!(comms, waiting_tokens, token, i, count_send)
-    printtoken(token, i, "Process")
+    # printtoken(token, i, "Process")
     @match isconsistentcut(token.cut, token.depend) begin
         true => begin
-            println("Process ", i, ": Consistent cut")
+            # println("Process ", i, ": Consistent cut")
             evaluatetoken!(comms, waiting_tokens, token, i, count_send) # We have a consistent cut
         end 
         (false, newprocess) => begin
             # Not a consistent cut
-            println("Process ", i, ": Inconsistent cut, target process: ", newprocess)
+            # println("Process ", i, ": Inconsistent cut, target process: ", newprocess)
             # NOTE: Optimization 2: target is set by depend
-            # token.target = (newprocess, :after, token.depend[newprocess])
             token.target = if isnothing(token.cut[newprocess]) || token.depend[newprocess] > token.cut[newprocess].t
                 (newprocess, :at, token.depend[newprocess])
             else
                 (newprocess, :after, token.cut[newprocess].t)
             end
+
+            # # Not a consistent cut
+            # token.target = if isnothing(token.cut[newprocess])
+            #     (newprocess, :at, token.depend[newprocess])
+            # else
+            #     (newprocess, :after, token.cut[newprocess].t)
+            # end
+
             sendtoken!(comms[newprocess], waiting_tokens, token, false, i, count_send)
         end
         _ => error("isconsistentcut() API not what we're expecting!")
@@ -478,9 +485,9 @@ Only local events will be received by receiveevent!
 function receiveevent!(procevents, comms, pos_intervals, waiting_tokens, e, ϵ, i, count_send)
     # save e in events
     # updateProcevents!(procevents, e, i)
-    printEvent(e, i, "Receive Event")
+    # printEvent(e, i, "Receive Event")
     for token ∈ copy(waiting_tokens)
-        printtoken(token, i, "Current Token")
+        # printtoken(token, i, "Current Token")
         @match token.target begin
             (e.process, :at, t), if t == e.t end => begin
                 addeventtotoken!(token, e, i)
@@ -505,7 +512,7 @@ function addvirtevent!(procevents, pos_intervals, n, i, vir_t, ϵ, type)
     if is_pos == false
         return nothing
     end
-    println("Process ", i, ": Add virtual event at time: ", vir_t)
+    # println("Process ", i, ": Add virtual event at time: ", vir_t)
     new_id = string(i, "|", i, "|", vir_t)
     new_V = fill(max(vir_t - ϵ, 0.), n)
     new_V[i] = vir_t
@@ -514,7 +521,7 @@ function addvirtevent!(procevents, pos_intervals, n, i, vir_t, ϵ, type)
     ret_event = updateProcevents!(procevents, new_event, i)
     # eventᵢ = searchsortedfirst(map(x -> x.t, procevents), vir_t)
     # insert!(procevents, eventᵢ, new_event)
-    printEvent(ret_event, i, "addvirtevent")
+    # printEvent(ret_event, i, "addvirtevent")
     ret_event
 end
 
@@ -524,7 +531,7 @@ end
 TBW
 """
 function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, i, ϵ, predtrue, count_send)
-    printtoken(token, i, "Receive")
+    # printtoken(token, i, "Receive")
     push!(waiting_tokens, token)
     if predtrue && token.process == i
         sat_cut = max.(map(c -> c.V, token.cut)...)
@@ -550,13 +557,13 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
         # end
 
 
-    println("Process ", i, ": Receive: solver_events: ", map(x -> x.t, procevents))
+    # println("Process ", i, ": Receive: solver_events: ", map(x -> x.t, procevents))
     if i == token.target[1]
         need_vir = false
         vir_time = token.cut[token.process].t
         # check if we need to add virtual event
         if token.isvir == false && i != token.process
-            # This token is trying to complete a real event!
+            # This token is trying to complete a real event
             need_vir = true
             if token.type == :LEFT
                 vir_time -= ϵ
@@ -572,7 +579,7 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
             end
         end
 
-        println("Process ", i, ": need to create vir event? ", need_vir)    
+        # println("Process ", i, ": need to create vir event? ", need_vir)    
         if need_vir
             vir_event = addvirtevent!(procevents, pos_intervals, length(token.cut), i, vir_time, ϵ, token.type)
             if !isnothing(vir_event)
@@ -581,7 +588,7 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
                 return
             else
                 # if nothing is returned, virtual event's predicate is false
-                println("Process ", i, ": virtual event false. Skip!")    
+                # println("Process ", i, ": virtual event false. Skip!")    
             end
         end
         
@@ -589,7 +596,7 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
         if token.target[2] == :at
             for ev ∈ procevents
                 if ev.t == token.target[3]
-                    println("Process ", i, ": :at event found!")
+                    # println("Process ", i, ": :at event found!")
                     addeventtotoken!(token, ev, i)
                     processtoken!(comms, waiting_tokens, token, i, count_send)
                     at_event = true
@@ -597,20 +604,15 @@ function receivetoken!(procevents, comms, pos_intervals, waiting_tokens, token, 
                 end
             end
             if (!at_event)
-                println("Process ", i, ": :at event not found. Check if virtual event is necessary")
+                # println("Process ", i, ": :at event not found. Check if virtual event is necessary")
                 check_pos = ispos(pos_intervals, token.target[3])
-                println("Process ", i, ": predicate (:at): ", check_pos)
+                # println("Process ", i, ": predicate (:at): ", check_pos)
                 if at_event == false && check_pos == false
                     token.target = (token.target[1], :after, token.target[3])
                 end
             end
         end
 
-        
-        # if check_pos == false
-        #     token.target[2] = :after
-        # end
-        # always :after
         for ev ∈ procevents
             if token.target[3] < ev.t
                 addeventtotoken!(token, ev, i)
@@ -700,18 +702,28 @@ end
 
 TBW
 """
-function startmonitor(n, ϵ)
+function startmonitor(n, ϵ, k)
     # Comms for the abstractor
     # commsₐ = [Channel{Comm}(Inf) for _ = 1:n]
     # logs = [PriorityQueue() for _ = 1:n]
 
     # Comms for the solver
     commsₛ = [Channel{Comm}(Inf) for _ = 1:n]
+    
     pos_intervals = [[] for _ = 1:n]
     count_send_token = [0 for _ = 1:n]
-
+    
+    # open("result.txt", "w") do io
+    #     redirect_stdout(io) do 
+    #         for i in 1:n
+    #             errormonitor(@async process(commsₛ[i], i, n, ϵ, pos_intervals[i], k))
+    #             # errormonitor(@async abstractor!(commsₐ, commsₛ[i], logs[i], i, ϵ))
+    #             errormonitor(@async solver(commsₛ, i, n, ϵ, count_send_token))
+    #         end        
+    #     end
+    # end
     for i in 1:n
-        errormonitor(@async process(commsₛ[i], i, n, ϵ, pos_intervals[i]))
+        errormonitor(@async process(commsₛ[i], i, n, ϵ, pos_intervals[i], k))
         # errormonitor(@async abstractor!(commsₐ, commsₛ[i], logs[i], i, ϵ))
         errormonitor(@async solver(commsₛ, i, n, ϵ, count_send_token))
     end
