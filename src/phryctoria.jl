@@ -119,7 +119,7 @@ Called whenever a root on the signal is found
 trigger found a root:
 """
 function foundroot!(comms, log, root, i, counter_send)
-    println("Root on process ", root.process, ": ", root.t)
+    # println("Root on process ", root.process, ": ", root.t)
     # Keep the root's vector clock consistent with the process's previous events
     begin
         for e ∈ keys(log)
@@ -208,7 +208,7 @@ function flushlog!(solver_comm, pos_intervals, log, flush_num, ϵ)
         # Update vector clock to be consistent with ϵ
         event.V = max.(event.t - ϵ, event.V)
 
-        println("Sending event ", repr(event.V), " to solver")
+        # println("Sending event ", repr(event.V), " to solver")
         put!(solver_comm, Comm(:newevent, event, pos_intervals))
     end
 end
@@ -341,7 +341,7 @@ function sendtoken!(comm, waiting_tokens, token, predeval, i, counter_send)
         counter_send[i] += 1
         println("Process ", i, ": Root/Token sent ", counter_send[i], " times")
     else
-        println("Process ", i, ": Root/Token sent to my self, do not increment coutner")
+        # println("Process ", i, ": Root/Token sent to my self, do not increment coutner")
     end
     token_position = findfirst(x -> x.process == token.process, waiting_tokens)
     deleteat!(waiting_tokens, token_position)
