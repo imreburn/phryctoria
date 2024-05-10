@@ -54,9 +54,24 @@ Combine two events occurring on the same process at the same time to just one ev
 """
 function combine(e₁, e₂)
     @match (e₁, e₂) begin
-        (Root(id₁, pid, types, t, V₁), Event(_, pid, t, _, V₂)) ||
-            (Event(_, pid, t, _, V₂), Root(id₁, pid, types, t, V₁)) => Root(id₁, pid, types, t, max.(V₁, V₂))
-        (Event(id₁, pid, t, is_pos, V₁), Event(_, pid, t, is_pos, V₂)) => Event(id₁, pid, t, is_pos, max.(V₁, V₂))
+        (Root(id₁, pid, types, t, V₁), Event(_, pid, t, _, V₂, etype)) ||
+            (Event(_, pid, t, _, V₂, etype), Root(id₁, pid, types, t, V₁)) => begin
+            newtype = if leftroot ∈ types 
+                :myleft
+                elseif rightroot ∈ types 
+                    :myright
+                end
+            Event(id₁, pid, t, true, max.(V₁, V₂), newtype)
+        end
+        (Event(id₁, pid, t, is_pos, V₁, type₁), Event(_, pid, t, is_pos, V₂, type₂)) => begin
+            if (type₁ == :myleft || type₁ == :myright)
+                Event(id₁, pid, t, is_pos, max.(V₁, V₂), type₁)
+            elseif (type₂ == :myleft || type₂ == :myright)
+                Event(id₁, pid, t, is_pos, max.(V₁, V₂), type₂)
+            else
+                Event(id₁, pid, t, is_pos, max.(V₁, V₂), type₁)
+            end
+        end
         _ => error("Huh? How'd we end up with ", repr(e₁), " and ", repr(e₂), "?")
     end
 end
@@ -119,7 +134,7 @@ Called whenever a root on the signal is found
 trigger found a root:
 """
 function foundroot!(comms, log, root, i, counter_send)
-    # println("Root on process ", root.process, ": ", root.t)
+    println("Root on process ", root.process, ": ", root.t)
     # Keep the root's vector clock consistent with the process's previous events
     begin
         for e ∈ keys(log)
@@ -136,13 +151,22 @@ function foundroot!(comms, log, root, i, counter_send)
             if j ≠ root.process
                 # send root info to process j
                 counter_send[i] += 1
-                println("Process ", i, ": Root/Token sent ", counter_send[i], " times")
+                # println("Process ", i, ": Root/Token sent ", counter_send[i], " times")
                 put!(comm, Comm(:remoteroot, root, nothing))
             end
         end
     end
+    
+    event_type = if leftroot ∈ root.types
+        :myleft
+    elseif rightroot ∈ root.types
+        :myright
+    end
+    new_root = Event(root.id, root.process, root.t, true, root.V, event_type)
+    
     # add root info to log
-    updatelog!(log, root)
+    # updatelog!(log, root)
+    updatelog!(log, new_root)
 
     # Return type is used for determining positive intervals
     bound = if leftroot ∈ root.types && rightroot ∈ root.types
@@ -234,7 +258,7 @@ function remoteroot!(solver_comm, pos_intervals, i, log, root, ϵ)
     is_pos = ispos(pos_intervals, new_t)
     new_V = copy(root.V)
     new_V[i] = new_t
-    new_event = Event(new_id, i, new_t, is_pos, new_V) # Event(id, process, t, ispos, V)
+    new_event = Event(new_id, i, new_t, is_pos, new_V, :remoteright) # Event(id, process, t, ispos, V)
     # add e info to log
     updatelog!(log, new_event)
     # if there are any log events whose positions are locked in:
@@ -327,6 +351,14 @@ issatcut(cut) = cutcheck((_, e) -> e isa Event && !e.ispos, cut)
 TBW
 """
 function addeventtotoken!(token, e)
+    if token.process == e.process
+        token.type = e.type
+        if token.type == :myleft
+            token.reset = [true for _ = 1:length(token.cut)]
+        end
+    end
+    token.reset[e.process] = false
+
     token.cut[e.process] = e
     token.depend = max.(token.depend, e.V)
 end
@@ -339,10 +371,11 @@ TBW
 function sendtoken!(comm, waiting_tokens, token, predeval, i, counter_send)
     if i != token.target[1]
         counter_send[i] += 1
-        println("Process ", i, ": Root/Token sent ", counter_send[i], " times")
-    else
-        # println("Process ", i, ": Root/Token sent to my self, do not increment coutner")
     end
+    #     println("Process ", i, ": Root/Token sent ", counter_send[i], " times")
+    # else
+    #     # println("Process ", i, ": Root/Token sent to my self, do not increment coutner")
+    # end
     token_position = findfirst(x -> x.process == token.process, waiting_tokens)
     deleteat!(waiting_tokens, token_position)
     put!(comm, Comm(:token, token, predeval))
@@ -374,7 +407,7 @@ function processtoken!(comms, waiting_tokens, token, i, counter_send)
         true => evaluatetoken!(comms, waiting_tokens, token, i, counter_send) # We have a consistent cut
         (false, newprocess) => begin
             # Not a consistent cut
-            token.target = if isnothing(token.cut[newprocess])
+            token.target = if (isnothing(token.cut[newprocess]) || token.reset[newprocess])
                 (newprocess, :at, token.depend[newprocess])
             else
                 (newprocess, :after, token.cut[newprocess].t)
@@ -428,7 +461,7 @@ function addvirtevent!(events, pos_intervals, n, i, t, ϵ)
     is_pos = ispos(pos_intervals, t)
     new_V = fill(max(t - ϵ, 0.), n)
     new_V[i] = t
-    new_event = Event(new_id, i, t, is_pos, new_V)
+    new_event = Event(new_id, i, t, is_pos, new_V, :virtleft)
     insert!(events, eventᵢ, new_event)
     new_event
 end
@@ -442,8 +475,10 @@ function receivetoken!(events, comms, pos_intervals, waiting_tokens, token, i, �
     push!(waiting_tokens, token)
     if predtrue && token.process == i
         sat_cut = max.(map(c -> c.V, token.cut)...)
-        println("Found a satisfying cut! Token ", repr(token.process), ", cut ", repr(sat_cut))
+        println("Found a satisfying cut! Token ", repr(token.process), ", cut ", repr(sat_cut), ", type ", repr(token.type))
         token.target = (i, :after, token.cut[i].t)
+        token.type = nothing
+        token.reset = [false for _ = 1:length(token.cut)]
     end
 
     index = searchsortedfirst(map(x -> x.t, events), token.target[3])
@@ -484,7 +519,7 @@ TBW
 """
 function solver(comms, i, n, ϵ, counter_send) # Task
     # Init token
-    token = Token(i, [nothing for _ = 1:n], [0. for _ = 1:n], (i, :after, -1))
+    token = Token(i, [nothing for _ = 1:n], [0. for _ = 1:n], (i, :after, -1), nothing, [false for _ = 1:n])
     events = []
     waiting_tokens = [token]
     pos_intervals = []
@@ -507,6 +542,7 @@ mutable struct Event
     t
     ispos
     V # Physical Vector Clock
+    type
 end
 
 mutable struct Root
@@ -533,10 +569,13 @@ mutable struct Token
     cut::Vector{Union{Root,Event,Nothing}}
     depend
     target # (process, :at/:after, t)
+    type
+    reset
 end
 
 """
-    startmonitor(n, ϵ)
+    startmonitor(n, ϵ, k)
+    k: example selector
 
 TBW
 """
