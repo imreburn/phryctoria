@@ -6,6 +6,39 @@ using CSV
 
 export startmonitor, process, foundroot!
 
+debug = true
+function getcut(cut)
+    cutV = []
+    for (_, event) ∈ enumerate(cut)
+        if isnothing(event)
+            push!(cutV, nothing)
+        else
+            push!(cutV, event.t)
+        end
+    end
+    cutV
+end
+
+function getcut2(cut)
+    cutpos = []
+    for (_, event) ∈ enumerate(cut)
+        if isnothing(event) || !(event isa Event)
+            push!(cutpos, nothing)
+        elseif event isa Event
+            push!(cutpos, event.ispos)
+        end
+    end
+    cutpos    
+end
+
+function printEvent(event, i, fname)
+    println("Process ", i, ": ", fname, ": Event ", event.process, ": time: ",event.t, ", type: ", event.type, ", PVC: ", event.V, ", ispos: ", event.ispos)
+end
+
+function printtoken(token, i, fname)
+    println("Process ", i, ": ", fname, ": Token ", token.process, ": target: ", token.target, ", type: ", token.type, ", cut: ", getcut(token.cut), ", depend: ", token.depend, ", eval: ", getcut2(token.cut), ", reset: ", token.reset)
+end
+
 
 """
     process(comm::Channel, i, n)
@@ -350,7 +383,12 @@ issatcut(cut) = cutcheck((_, e) -> e isa Event && !e.ispos, cut)
 
 TBW
 """
-function addeventtotoken!(token, e)
+function addeventtotoken!(token, e, i)
+    if debug
+        printEvent(e, i, "ADD")
+        printtoken(token, i, "ADD:BEFORE")
+    end
+
     if token.process == e.process
         token.type = e.type
         if token.type == :myleft
@@ -361,6 +399,10 @@ function addeventtotoken!(token, e)
 
     token.cut[e.process] = e
     token.depend = max.(token.depend, e.V)
+    
+    if debug
+        printtoken(token, i, "ADD:AFTER")
+    end
 end
 
 """
@@ -378,6 +420,12 @@ function sendtoken!(comm, waiting_tokens, token, predeval, i, counter_send)
     # end
     token_position = findfirst(x -> x.process == token.process, waiting_tokens)
     deleteat!(waiting_tokens, token_position)
+    
+    if debug
+        str = string("SEND FROM ", i, " TO ", token.target[1])
+        printtoken(token, i, str)
+    end
+
     put!(comm, Comm(:token, token, predeval))
 end
 
@@ -426,22 +474,24 @@ TBW
 function receiveevent!(events, comms, pos_intervals, waiting_tokens, e, ϵ, i, counter_send)
     # save e in events
     push!(events, e)
-
+    if debug
+        printEvent(e, i, "RECVE")
+    end
     # Should be up to date, just might need to create a virtual event
     for token ∈ copy(waiting_tokens)
         @match token.target begin
             (e.process, :at, e.t) => begin # Process the event for the token
-                addeventtotoken!(token, e)
+                addeventtotoken!(token, e, i)
                 processtoken!(comms, waiting_tokens, token, i, counter_send)
             end
             (e.process, :after, t), if t < e.t end => begin # Process the event for the token
-                addeventtotoken!(token, e)
+                addeventtotoken!(token, e, i)
                 processtoken!(comms, waiting_tokens, token, i, counter_send)
             end
             (e.process, :at, t), if t < e.t end => begin # Time for a virtual event
                 n = length(token.cut)
                 event = addvirtevent!(events, pos_intervals, n, e.process, t, ϵ)
-                addeventtotoken!(token, event)
+                addeventtotoken!(token, event, i)
                 processtoken!(comms, waiting_tokens, token, i, counter_send)
             end
             (e.process, :at, _) => continue # Don't do anything, our target hasn't shown up yet
@@ -472,10 +522,14 @@ end
 TBW
 """
 function receivetoken!(events, comms, pos_intervals, waiting_tokens, token, i, ϵ, predtrue, counter_send)
+    if debug
+        printtoken(token, i, "RECVT")
+    end
+
     push!(waiting_tokens, token)
     if predtrue && token.process == i
         sat_cut = max.(map(c -> c.V, token.cut)...)
-        println("Found a satisfying cut! Token ", repr(token.process), ", cut ", repr(sat_cut), ", type ", repr(token.type))
+        println("Process ", i, ": Found a satisfying cut! Token ", repr(token.process), ", cut ", repr(sat_cut), ", type ", repr(token.type))
         token.target = (i, :after, token.cut[i].t)
         token.type = nothing
         token.reset = [false for _ = 1:length(token.cut)]
@@ -492,20 +546,27 @@ function receivetoken!(events, comms, pos_intervals, waiting_tokens, token, i, �
             error("Why didn't this event get added to events? ", token.target[3])
         end
     end
+
+    if debug
+        for ev ∈ events
+            printEvent(ev, i, "RECV:SOLVER_EVENT")
+        end
+    end
+    
     @match token.target begin # Careful, the order of these arms matter
         (i, :after, events[end].t) => return # We're up to date, now we just need to wait for a new event
         (i, :after, events[index].t) => begin # Found the event at events[index + 1], process it
-            addeventtotoken!(token, events[index + 1])
+            addeventtotoken!(token, events[index + 1], i)
             processtoken!(comms, waiting_tokens, token, i, counter_send)
         end
         (i, :after, _) || (i, :at, events[index].t) => begin # Found the event at events[index], process it
-            addeventtotoken!(token, events[index])
+            addeventtotoken!(token, events[index], i)
             processtoken!(comms, waiting_tokens, token, i, counter_send)
         end
         (i, :at, t) => begin # Didn't find it, need to create a virtual event
             n = length(token.cut)
             event = addvirtevent!(events, pos_intervals, n, i, t, ϵ)
-            addeventtotoken!(token, event)
+            addeventtotoken!(token, event, i)
             processtoken!(comms, waiting_tokens, token, i, counter_send)
         end
         _ => error("Something in the token's target isn't looking right: ", token.target)
